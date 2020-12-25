@@ -92,7 +92,7 @@ func WsWallte(c *gin.Context) {
 				break
 			}
 
-			_, err = wallet.WalletEntry(&rd)
+			_, err = wallet.Entry(&rd)
 			if err != nil {
 				ws.WriteMessage(mt, []byte(err.Error()))
 				break
@@ -189,7 +189,7 @@ func DeductWalletController(c *gin.Context) {
 		return
 	}
 
-	status, err := wallet.WalletEntry(&rd)
+	status, err := wallet.Entry(&rd)
 	if err != nil {
 		c.JSON(status, gin.H{"succes": false, "data": err.Error()})
 	}
@@ -208,7 +208,7 @@ func StoreWalletController(c *gin.Context) {
 		return
 	}
 
-	status, err := wallet.WalletEntry(&rd)
+	status, err := wallet.Entry(&rd)
 	if err != nil {
 		c.JSON(status, gin.H{"succes": false, "data": err.Error()})
 	}
@@ -282,7 +282,7 @@ func DeductWalletControllerDB(c *gin.Context) {
 		return
 	}
 
-	status, err := wallet.WalletEntryDB(&p)
+	status, err := wallet.EntryDB(&p)
 	if err != nil {
 		c.JSON(status, gin.H{"succes": false, "data": err.Error()})
 		return
@@ -302,7 +302,7 @@ func StoreWalletControllerDB(c *gin.Context) {
 		return
 	}
 
-	status, err := wallet.WalletEntryDB(&p)
+	status, err := wallet.EntryDB(&p)
 	if err != nil {
 		c.JSON(status, gin.H{"succes": false, "data": err.Error()})
 		return

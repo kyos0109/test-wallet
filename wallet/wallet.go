@@ -15,8 +15,8 @@ import (
 	"github.com/kyos0109/test-wallet/modules"
 )
 
-// WalletEntry ...
-func WalletEntry(rd *modules.RedisData) (int, error) {
+// Entry ...
+func Entry(rd *modules.RedisData) (int, error) {
 	var l modules.Lock
 
 	timer := time.Now()
@@ -90,8 +90,8 @@ func WalletEntry(rd *modules.RedisData) (int, error) {
 	return http.StatusOK, nil
 }
 
-// WalletEntryDB ...
-func WalletEntryDB(postData *modules.PostDatav2) (int, error) {
+// EntryDB ...
+func EntryDB(postData *modules.PostDatav2) (int, error) {
 	db := database.GetDBInstance()
 
 	uid, _ := strconv.Atoi(postData.User)
@@ -138,6 +138,7 @@ func WalletEntryDB(postData *modules.PostDatav2) (int, error) {
 		}
 
 		wallet.Amount = wallet.Amount - float64(postData.Amount)
+		wallet.UpdateAt = time.Now()
 
 		order.AfterAmount = wallet.Amount
 		order.Status = modules.OrderOk
@@ -156,6 +157,7 @@ func WalletEntryDB(postData *modules.PostDatav2) (int, error) {
 
 	case *modules.PostStorev2:
 		wallet.Amount = wallet.Amount + float64(postData.Amount)
+		wallet.UpdateAt = time.Now()
 
 		order.AfterAmount = wallet.Amount
 		order.Status = modules.OrderOk
