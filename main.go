@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/kyos0109/test-wallet/database"
 	kredis "github.com/kyos0109/test-wallet/redis"
+	"github.com/kyos0109/test-wallet/wallet"
 )
 
 var ctx = context.Background()
@@ -21,6 +22,8 @@ var ctx = context.Background()
 func init() {
 	database.InitWithCtx(&ctx)
 	kredis.InitWithCtx(&ctx)
+
+	go wallet.ExpiryWorker(ctx)
 }
 
 func main() {
@@ -48,6 +51,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+
 	log.Println("Shutdown Server ...")
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)

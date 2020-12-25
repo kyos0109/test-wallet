@@ -46,7 +46,10 @@ func GetDBInstance() *DBConn {
 		gormDB := &gorm.DB{}
 		gormDB, err = gorm.Open(postgres.New(postgres.Config{
 			Conn: sqlDB,
-		}), &gorm.Config{})
+		}), &gorm.Config{
+			SkipDefaultTransaction: true,
+			PrepareStmt:            true,
+		})
 
 		if err != nil {
 			log.Fatalln(err)

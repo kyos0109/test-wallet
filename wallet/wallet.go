@@ -1,7 +1,10 @@
 package wallet
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -14,6 +17,12 @@ import (
 
 	"github.com/kyos0109/test-wallet/modules"
 )
+
+type wallet struct {
+	db   *database.DBConn
+	data *modules.Wallet
+	post *modules.PostDatav2
+}
 
 // Entry ...
 func Entry(rd *modules.RedisData) (int, error) {
@@ -92,15 +101,21 @@ func Entry(rd *modules.RedisData) (int, error) {
 
 // EntryDB ...
 func EntryDB(postData *modules.PostDatav2) (int, error) {
-	db := database.GetDBInstance()
+	w := &wallet{}
+	w.db = database.GetDBInstance()
+	w.post = postData
+
+	if err := w.checkRequestID(); err != nil {
+		return http.StatusBadRequest, errors.New(err.Error())
+	}
 
 	uid, _ := strconv.Atoi(postData.User)
 	aid, _ := strconv.Atoi(postData.Agent)
 	wallet := &modules.Wallet{}
 
-	tx := db.Conn().Begin()
+	tx := w.db.Conn().Begin()
 
-	r := db.Conn().
+	r := w.db.Conn().
 		Table("users").Select("wallets.*").
 		Joins("left join wallets on wallets.user_id = users.id").
 		Find(&wallet, modules.User{ID: uid, AgentID: aid})
@@ -115,13 +130,14 @@ func EntryDB(postData *modules.PostDatav2) (int, error) {
 		return http.StatusOK, errors.New("user not found")
 	}
 
-	oid, err := createOrder(wallet, modules.OrderCreate, postData)
+	w.data = wallet
+	oid, err := w.createOrder(modules.OrderCreate, postData)
 	if err != nil {
 		return http.StatusInternalServerError, errors.New("create order error")
 	}
 
 	order := &modules.Order{}
-	o := db.Conn().Find(&order, &modules.Order{ID: oid})
+	o := w.db.Conn().Find(&order, &modules.Order{ID: oid})
 	if o.Error != nil {
 		return http.StatusOK, errors.New("get order error")
 	}
@@ -183,23 +199,69 @@ func EntryDB(postData *modules.PostDatav2) (int, error) {
 	return http.StatusOK, nil
 }
 
-func createOrder(walletData *modules.Wallet, oType modules.OrderStatus, p *modules.PostDatav2) (guuid.UUID, error) {
-	db := database.GetDBInstance()
+func (w *wallet) createOrder(oType modules.OrderStatus, p *modules.PostDatav2) (guuid.UUID, error) {
 	o := &modules.Order{
-		UserID:       walletData.UserID,
-		WalletID:     walletData.ID,
+		UserID:       w.data.UserID,
+		WalletID:     w.data.ID,
 		RequestID:    p.RequestID,
 		OpType:       modules.WalletNone,
-		BeforeAmount: walletData.Amount,
+		BeforeAmount: w.data.Amount,
 		Status:       oType,
 		CreateAt:     time.Now(),
 		UpdateAt:     time.Now(),
 	}
 
-	r := db.Conn().Create(&o)
+	r := w.db.Conn().Create(&o)
 	if r.Error != nil {
 		return guuid.Nil, r.Error
 	}
 
 	return o.ID, nil
+}
+
+func (w *wallet) checkRequestID() error {
+	a := &modules.APIRequestIDs{}
+	u := guuid.MustParse(w.post.RequestID)
+	p := w.post.ClientIP
+
+	r := w.db.Conn().Find(&a, &modules.APIRequestIDs{ID: u, IP: p})
+	if r.Error != nil {
+		return r.Error
+	}
+
+	if r.RowsAffected == 0 {
+		req := &modules.APIRequestIDs{
+			ID:       u,
+			IP:       p,
+			CreateAt: time.Now(),
+		}
+		rr := w.db.Conn().Create(&req)
+		if rr.Error != nil {
+			return r.Error
+		}
+	} else {
+		return errors.New("Request ID Repeat: " + a.ID.String() + " from: " + a.IP)
+	}
+
+	return nil
+}
+
+// ExpiryWorker ...
+func ExpiryWorker(ctx context.Context) {
+	db := database.GetDBInstance()
+
+	log.Print("start expiry worker...")
+	for {
+		select {
+		case <-ctx.Done():
+			log.Print("stop worker...")
+			return
+		default:
+			r := db.Conn().Where("create_at < ?", time.Now()).Delete(&modules.APIRequestIDs{})
+			if r.Error != nil {
+				fmt.Println(r.Error)
+			}
+			time.Sleep(time.Second * 60)
+		}
+	}
 }

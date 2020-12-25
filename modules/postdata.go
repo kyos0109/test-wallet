@@ -2,11 +2,12 @@ package modules
 
 // PostDatav2 ...
 type PostDatav2 struct {
-	Agent     string      `json:"agent" validate:"required" binding:"required"`
-	User      string      `json:"user" validate:"required" binding:"required"`
-	RequestID string      `json:"requestid" validate:"required" binding:"required"`
-	Amount    int         `json:"amount" validate:"required" binding:"required"`
-	Token     string      `json:"token" validate:"required" binding:"required"`
+	Agent     string `json:"agent" validate:"required" binding:"required"`
+	User      string `json:"user" validate:"required" binding:"required"`
+	RequestID string `json:"requestid" validate:"required" binding:"required"`
+	Amount    int    `json:"amount" validate:"required" binding:"required"`
+	Token     string `json:"token" validate:"required" binding:"required"`
+	ClientIP  string
 	Detail    interface{} `json:"detail"`
 }
 

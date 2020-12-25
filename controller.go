@@ -275,6 +275,7 @@ func chinSelectFunc(c *gin.Context) {
 func DeductWalletControllerDB(c *gin.Context) {
 	var p modules.PostDatav2
 
+	p.ClientIP = c.ClientIP()
 	p.Detail = &modules.PostDeductv2{}
 
 	if err := c.ShouldBindJSON(&p); err != nil {
@@ -295,6 +296,7 @@ func DeductWalletControllerDB(c *gin.Context) {
 func StoreWalletControllerDB(c *gin.Context) {
 	var p modules.PostDatav2
 
+	p.ClientIP = c.ClientIP()
 	p.Detail = &modules.PostStorev2{}
 
 	if err := c.ShouldBindJSON(&p); err != nil {
