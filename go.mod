@@ -8,4 +8,6 @@ require (
 	github.com/go-redis/redis/v8 v8.0.0-beta.8
 	github.com/google/uuid v1.1.1
 	github.com/gorilla/websocket v1.4.2
+	gorm.io/driver/postgres v1.0.5
+	gorm.io/gorm v1.20.5
 )
