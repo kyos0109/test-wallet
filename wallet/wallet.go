@@ -1,9 +1,12 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"strconv"
@@ -11,42 +14,35 @@ import (
 
 	guuid "github.com/google/uuid"
 
-	kredis "github.com/kyos0109/test-wallet/redis"
-
+	"github.com/kyos0109/test-wallet/config"
 	"github.com/kyos0109/test-wallet/database"
-
+	"github.com/kyos0109/test-wallet/kredis"
 	"github.com/kyos0109/test-wallet/modules"
 )
 
 type wallet struct {
-	db   *database.DBConn
-	data *modules.Wallet
-	post *modules.PostDatav2
+	db    *database.DBConn
+	redis *kredis.RedisClient
+	data  *modules.Wallet
+	post  *modules.PostDatav2
 }
 
 // Entry ...
 func Entry(rd *modules.RedisData) (int, error) {
-	var l modules.Lock
-
 	timer := time.Now()
 
-	rd.HashMap = make(map[string]interface{})
-
-	r := kredis.GetRedisClientInstance()
-
 	rd.OrderID = guuid.New().String()
-	rd.RequestIDTTL = 60
-
-	l.TTL = kredis.RedisLockTTL
-	l.Timeout = kredis.RedisLockTimeout
-	l.RetryInterval = kredis.RedisLockRetryInterval
 
 	p := rd.PostData
 	rd.RequestID = p.RequestID
-	rd.UserKey = BuildRedisDataWithDelimiter(kredis.RedisUserPerfix, &p.Agent, &p.User)
-	rd.WallteOpKey = BuildRedisDataWithDelimiter(kredis.RediswallteOpsPerfix, &p.Agent, &p.User)
+	rd.UserKey = BuildRedisDataWithDelimiter(config.RedisUserPrefix, &p.Agent, &p.User)
+	rd.WallteOpKey = BuildRedisDataWithDelimiter(config.RedisWallteOpsPrefix, &p.Agent, &p.User)
 
-	ok, err := r.SetRequestIDLog(rd)
+	w := &wallet{
+		redis: kredis.GetRedisClientInstance(),
+		db:    database.GetDBInstance(),
+	}
+	ok, err := w.redis.SetRequestIDLog(rd)
 	if err != nil {
 		return http.StatusInternalServerError, err
 	}
@@ -54,71 +50,110 @@ func Entry(rd *modules.RedisData) (int, error) {
 		return http.StatusPreconditionFailed, errors.New("Request ID Repeat")
 	}
 
-	l.Key = BuildRedisDataWithDelimiter(kredis.RedisLockOpsPerfix, &p.Agent, &p.User)
-	l.RequestID = p.RequestID
+	uid, _ := strconv.Atoi(p.User)
+	rd.Order = &modules.Order{
+		ID:        guuid.MustParse(rd.OrderID),
+		UserID:    uid,
+		RequestID: p.RequestID,
+		Status:    modules.OrderCreate,
+		CreateAt:  time.Now(),
+	}
 
-	err = r.TryLock(&l)
+	l := &modules.Lock{
+		Key:       BuildRedisDataWithDelimiter(config.RedisLockOpsPrefix, &p.Agent, &p.User),
+		RequestID: p.RequestID,
+	}
+
+	err = w.redis.TryLock(l)
 	if err != nil {
 		return http.StatusInternalServerError, err
 	}
-	defer r.UnLock(&l)
+	defer w.redis.UnLock(l)
 
-	accountBalance := r.UserWalletHGet(rd)
+LOOP:
+	accountBalance := w.redis.UserWalletHGet(rd)
 	if accountBalance < 0 {
-		return http.StatusOK, errors.New("Not got Balance")
+		if err = w.onceSyncDBWalletToRedis(rd); err != nil {
+			return http.StatusOK, errors.New("Not got Balance")
+		}
+
+		goto LOOP
 	}
-	rd.OpAmtBefor = accountBalance
+	if !w.redis.UserStatusHGet(rd) {
+		return http.StatusOK, errors.New("User Status IS Disable")
+	}
+
+	walletID := w.redis.UserWalletIDHGet(rd)
+	if walletID < 0 {
+		return http.StatusOK, errors.New("Not got wallet id")
+	}
+
+	rd.Order.WalletID = walletID
+	rd.Order.BeforeAmount = float64(accountBalance)
+	rd.HashMap = make(map[string]interface{})
 
 	switch d := rd.PostData.Detail.(type) {
 	case *modules.PostStorev2:
-		rd.Amount = accountBalance + (p.Amount)
+		rd.Order.AfterAmount = float64(accountBalance + (p.Amount))
+
+		rd.Order.OpType = modules.WalletStore
 	case *modules.PostDeductv2:
 		if p.Amount > accountBalance {
 			return http.StatusOK, errors.New("Not Enough Balance")
 		}
 
-		rd.Amount = accountBalance + (-p.Amount)
-		rd.HashMap[kredis.RedisHashlastGameKey] = d.GameID
+		rd.Order.AfterAmount = float64(accountBalance + (-p.Amount))
+		rd.Order.OpType = modules.WalletDeduct
+		rd.Order.GameID = d.GameID
+		rd.HashMap[config.RedisHashlastGameKey] = d.GameID
 	default:
 		return http.StatusInternalServerError, errors.New("interface error")
 	}
 
-	rd.HashMap[kredis.RedisHashWalletKey] = rd.Amount
-	rd.HashMap[kredis.RedisHashlastChangeKey] = time.Now()
+	rd.HashMap[config.RedisHashWalletKey] = rd.Order.AfterAmount
+	rd.HashMap[config.RedisHashlastChangeKey] = time.Now()
 
-	err = r.UserWalletHMSet(rd)
+	rd.Order.Status = modules.OrderOk
+	rd.Order.UpdateAt = time.Now()
+
+	err = w.redis.UserWalletHMSet(rd)
 	if err != nil {
 		return http.StatusInternalServerError, err
 	}
 
-	rd.OpAmtAfter = r.UserWalletHGet(rd)
 	rd.OpTimeSec = time.Now().Sub(timer).Seconds()
 
 	LogBalance(rd)
+
+	if err = w.redis.LPushJob(rd); err != nil {
+		log.Println(rd)
+		log.Println(err)
+	}
 
 	return http.StatusOK, nil
 }
 
 // EntryDB ...
 func EntryDB(postData *modules.PostDatav2) (int, error) {
-	w := &wallet{}
-	w.db = database.GetDBInstance()
+	w := &wallet{
+		db: database.GetDBInstance(),
+	}
 	w.post = postData
 
 	if err := w.checkRequestID(); err != nil {
 		return http.StatusBadRequest, errors.New(err.Error())
 	}
 
-	uid, _ := strconv.Atoi(postData.User)
-	aid, _ := strconv.Atoi(postData.Agent)
 	wallet := &modules.Wallet{}
+
+	uid, _ := strconv.Atoi(w.post.User)
 
 	tx := w.db.Conn().Begin()
 
 	r := w.db.Conn().
 		Table("users").Select("wallets.*").
 		Joins("left join wallets on wallets.user_id = users.id").
-		Find(&wallet, modules.User{ID: uid, AgentID: aid})
+		Find(&wallet, modules.User{ID: uid, AgentID: postData.Agent})
 
 	if r.Error != nil {
 		tx.Rollback()
@@ -248,13 +283,13 @@ func (w *wallet) checkRequestID() error {
 
 // ExpiryWorker ...
 func ExpiryWorker(ctx context.Context) {
-	db := database.GetDBInstance()
+	db := ctx.Value(database.DBConn{}).(*database.DBConn)
 
 	log.Print("start expiry worker...")
 	for {
 		select {
 		case <-ctx.Done():
-			log.Print("stop worker...")
+			log.Print("Stop worker...")
 			return
 		default:
 			r := db.Conn().Where("create_at < ?", time.Now()).Delete(&modules.APIRequestIDs{})
@@ -264,4 +299,233 @@ func ExpiryWorker(ctx context.Context) {
 			time.Sleep(time.Second * 60)
 		}
 	}
+}
+
+func (w *wallet) onceSyncDBWalletToRedis(rd *modules.RedisData) error {
+	wallet := &modules.Wallet{}
+	agent := &modules.Agent{}
+
+	uid, _ := strconv.Atoi(rd.PostData.User)
+	tx := w.db.Conn().Begin()
+
+	a := tx.Select("id").Find(&agent, modules.Agent{ID: rd.PostData.Agent, Status: true})
+	if a.RowsAffected <= 0 {
+		return errors.New("agent not found or disable")
+	}
+
+	r := tx.Table("users").Select("wallets.*").
+		Joins("INNER JOIN wallets ON wallets.user_id = users.id").
+		Find(&wallet, modules.User{ID: uid, AgentID: rd.PostData.Agent, Status: true})
+
+	if r.Error != nil {
+		tx.Rollback()
+		return errors.New("get user data error")
+	}
+
+	if r.RowsAffected <= 0 {
+		tx.Rollback()
+		return errors.New("user not found")
+	}
+
+	tx.Commit()
+
+	rd.HashMap = make(map[string]interface{})
+	rd.HashMap[config.RedisHashWalletKey] = wallet.Amount
+	rd.HashMap[config.RedisHashWalletIDKey] = wallet.ID
+	rd.HashMap[config.RedisHashlastSyncKey] = time.Now()
+	rd.HashMap[config.RedisHashlastStatusKey] = true
+
+	if err := w.redis.UserWalletHMSet(rd); err != nil {
+		return err
+	}
+
+	if ok := w.redis.Expire(rd.UserKey, config.Redis.CacheDBDataTTL); !ok {
+		return errors.New("Set Expire Cache User Data Error")
+	}
+	// _, err := w.redis.SyncDBCache(rd.UserKey, rd.HashMap)
+	// if err != nil {
+	// 	return err
+	// }
+
+	return nil
+}
+
+// EntrySingle ...
+func EntrySingle(rd *modules.RedisData) (int, error) {
+	timer := time.Now()
+
+	rd.OrderID = guuid.New().String()
+
+	p := rd.PostData
+	rd.RequestID = p.RequestID
+	rd.UserKey = BuildRedisDataWithDelimiter(config.RedisUserPrefix, &p.Agent, &p.User)
+	rd.WallteOpKey = BuildRedisDataWithDelimiter(config.RedisWallteOpsPrefix, &p.Agent, &p.User)
+
+	w := &wallet{
+		redis: kredis.GetRedisClientInstance(),
+		db:    database.GetDBInstance(),
+	}
+
+	ok, err := w.redis.SetRequestIDLog(rd)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	if !ok {
+		return http.StatusPreconditionFailed, errors.New("Request ID Repeat")
+	}
+
+	uid, _ := strconv.Atoi(p.User)
+	rd.Order = &modules.Order{
+		ID:        guuid.MustParse(rd.OrderID),
+		UserID:    uid,
+		RequestID: p.RequestID,
+		Status:    modules.OrderCreate,
+		CreateAt:  time.Now(),
+	}
+
+	l := &modules.Lock{
+		Key:       BuildRedisDataWithDelimiter(config.RedisLockOpsPrefix, &p.Agent, &p.User),
+		RequestID: p.RequestID,
+	}
+
+	err = w.redis.TryLock(l)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	defer w.redis.UnLock(l)
+
+LOOP1:
+	accountBalance := w.redis.UserWalletHGet(rd)
+	if accountBalance < 0 {
+		if err = w.onceSyncDBWalletToRedis(rd); err != nil {
+			return http.StatusOK, err
+		}
+
+		goto LOOP1
+	}
+	if !w.redis.UserStatusHGet(rd) {
+		return http.StatusOK, errors.New("User Status is Disable")
+	}
+
+	walletID := w.redis.UserWalletIDHGet(rd)
+	if walletID < 0 {
+		return http.StatusOK, errors.New("Not got wallet id")
+	}
+
+	rd.Order.WalletID = walletID
+	rd.Order.BeforeAmount = float64(accountBalance)
+
+LOOP2:
+	url := w.redis.HGet(BuildRedisDataWithDelimiter(config.RedisAgentPrefix, p.Agent), config.RedisHashSingleWalletURLKey)
+	if url == "" {
+		if err := w.onceSyncAgentToRedis(rd.PostData); err != nil {
+			return http.StatusOK, err
+		}
+		goto LOOP2
+	}
+
+	postData, err := json.Marshal(rd.PostData)
+	if err != nil {
+		return http.StatusBadRequest, err
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(postData))
+	req.Header.Set("Content-Type", "application/json")
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+
+	client := &http.Client{}
+	client.Timeout = config.Http.ClientTimeout
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return http.StatusBadGateway, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 199 || resp.StatusCode > 399 {
+		return http.StatusGone, errors.New("Wallet URL Response Status Code: " + resp.Status)
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return http.StatusServiceUnavailable, err
+	}
+
+	log.Println(string(body))
+
+	res := &modules.EchoResponse{}
+	err = json.Unmarshal(body, &res)
+	if err != nil {
+		return http.StatusServiceUnavailable, err
+	}
+
+	rd.HashMap = make(map[string]interface{})
+
+	switch d := rd.PostData.Detail.(type) {
+	case *modules.PostStorev2:
+		rd.Order.AfterAmount = float64(res.Echo.Amount)
+		rd.Order.OpType = modules.WalletStore
+	case *modules.PostDeductv2:
+		rd.Order.OpType = modules.WalletDeduct
+		rd.Order.AfterAmount = float64(res.Echo.Amount)
+		rd.Order.GameID = d.GameID
+		rd.HashMap[config.RedisHashlastGameKey] = d.GameID
+	default:
+		return http.StatusInternalServerError, errors.New("interface error")
+	}
+
+	rd.HashMap[config.RedisHashWalletKey] = res.Echo.Amount
+	rd.HashMap[config.RedisHashlastChangeKey] = time.Now()
+
+	rd.Order.Status = modules.OrderOk
+	rd.Order.UpdateAt = time.Now()
+
+	err = w.redis.UserWalletHMSet(rd)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+
+	rd.OpTimeSec = time.Now().Sub(timer).Seconds()
+
+	LogBalance(rd)
+
+	if err = w.redis.LPushJob(rd); err != nil {
+		log.Println(rd)
+		log.Println(err)
+	}
+
+	return http.StatusOK, nil
+}
+
+func (w *wallet) onceSyncAgentToRedis(post *modules.PostDatav2) error {
+	agent := &modules.Agent{}
+
+	res := w.db.Conn().Find(&agent, modules.Agent{ID: post.Agent, Status: true})
+	if res.RowsAffected <= 0 {
+		return errors.New("Agent not found or disable")
+	}
+
+	if len(agent.SingleWalletUrl) <= 0 {
+		return errors.New("Single Wallet Url Not Set")
+	}
+
+	agentHash := make(map[string]interface{})
+	agentHash[config.RedisHashAgentIDKey] = agent.ID
+	agentHash[config.RedisHashPublicKey] = agent.Key
+	agentHash[config.RedisHashPrivateKey] = agent.PrivateKey
+	agentHash[config.RedisHashSingleWalletURLKey] = agent.SingleWalletUrl
+	agentHash[config.RedisHashAgentStatusKey] = agent.Status
+
+	agentKey := BuildRedisDataWithDelimiter(config.RedisAgentPrefix, post.Agent)
+	if err := w.redis.HMSet(agentKey, agentHash); err != nil {
+		return errors.New("Agent Data Sync Error")
+	}
+
+	if ok := w.redis.Expire(agentKey, config.Redis.CacheDBDataTTL); !ok {
+		return errors.New("Set Expire Cache Agent Data Error")
+	}
+
+	return nil
 }

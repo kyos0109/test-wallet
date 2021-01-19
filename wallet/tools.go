@@ -6,8 +6,9 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/kyos0109/test-wallet/config"
+	"github.com/kyos0109/test-wallet/kredis"
 	"github.com/kyos0109/test-wallet/modules"
-	kredis "github.com/kyos0109/test-wallet/redis"
 )
 
 // BuildRedisDataWithDelimiter create with : string
@@ -18,10 +19,10 @@ func BuildRedisDataWithDelimiter(args ...interface{}) string {
 		switch val := v.(type) {
 		case string:
 			buffer.WriteString(val)
-			buffer.WriteString(kredis.RedisDelimiter)
+			buffer.WriteString(config.RedisDelimiter)
 		case *string:
 			buffer.WriteString(*val)
-			buffer.WriteString(kredis.RedisDelimiter)
+			buffer.WriteString(config.RedisDelimiter)
 		default:
 			log.Fatalln("Not match condition process, type:", reflect.TypeOf(val))
 		}
@@ -32,7 +33,7 @@ func BuildRedisDataWithDelimiter(args ...interface{}) string {
 // LogBalance to redis
 func LogBalance(rd *modules.RedisData) {
 	r := kredis.GetRedisClientInstance()
-	rd.OrderKey = BuildRedisDataWithDelimiter(kredis.RedisOrderPerfix, &rd.OrderID)
+	rd.OrderKey = BuildRedisDataWithDelimiter(config.RedisOrderPrefix, &rd.OrderID)
 
 	var wg sync.WaitGroup
 	wg.Add(2)

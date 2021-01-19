@@ -1,6 +1,9 @@
 package main
 
-import "github.com/gin-gonic/gin"
+import (
+	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
 
 func routerEntry(router *gin.Engine) {
 	v1 := router.Group("/v1")
@@ -25,6 +28,13 @@ func routerEntry(router *gin.Engine) {
 		v4.POST("/api/store", StoreWalletControllerDB)
 	}
 
+	v5 := router.Group("/v5")
+	{
+		v5.POST("/api/deduct", DeductSingleWalletController)
+		v5.POST("/api/store", StoreSingleWalletController)
+		v5.POST("/api/echo", EchoResponse)
+	}
+
 	ws := router.Group("/ws")
 	{
 		ws.GET("", WsWallte)
@@ -35,4 +45,6 @@ func routerEntry(router *gin.Engine) {
 		tools.POST("/fakedata", CreateRedisData)
 		tools.POST("/fakedatadb", CreateDBData)
 	}
+
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 }

@@ -3,13 +3,14 @@ package database
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"sync"
-	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"github.com/kyos0109/test-wallet/config"
 	"github.com/kyos0109/test-wallet/modules"
 )
 
@@ -22,26 +23,30 @@ var (
 	ctx      context.Context
 	once     sync.Once
 	dbClient *DBConn
+	dsn      string
 )
 
 // InitWithCtx ...
-func InitWithCtx(pctx *context.Context) {
-	ctx = *pctx
+func InitWithCtx(pctx *context.Context, c *config.DatabaseConfig) context.Context {
+	dsn = fmt.Sprintf("user=%s password=%s dbname=%s port=%d sslmode=disable TimeZone=%s",
+		c.UserName, c.Password, c.DBName, c.Port, c.TimeZone)
+
+	ctx = context.WithValue(*pctx, DBConn{}, GetDBInstance())
+
+	return ctx
 }
 
 // GetDBInstance ...
 func GetDBInstance() *DBConn {
 	once.Do(func() {
-		dsn := "user=happy password=Aa123456 dbname=wallte port=5432 sslmode=disable TimeZone=Asia/Taipei"
-
 		sqlDB, err := sql.Open("pgx", dsn)
 		if err != nil {
 			log.Fatalln(err)
 		}
 
-		sqlDB.SetMaxIdleConns(50)
-		sqlDB.SetMaxOpenConns(2000)
-		sqlDB.SetConnMaxIdleTime(time.Hour)
+		sqlDB.SetMaxIdleConns(config.DB.SetMaxOpenConns)
+		sqlDB.SetMaxOpenConns(config.DB.SetMaxIdleConns)
+		sqlDB.SetConnMaxIdleTime(config.DB.SetConnMaxIdleTime)
 
 		gormDB := &gorm.DB{}
 		gormDB, err = gorm.Open(postgres.New(postgres.Config{
@@ -64,6 +69,11 @@ func GetDBInstance() *DBConn {
 // CreateFakceUser ...
 func (db *DBConn) CreateFakceUser(usersData []modules.User) {
 	db.conn.WithContext(ctx).Create(&usersData)
+}
+
+// CreateFakceAgent ...
+func (db *DBConn) CreateFakceAgent(agentData []modules.Agent) {
+	db.conn.WithContext(ctx).Create(&agentData)
 }
 
 // CreateFakceWallet ...

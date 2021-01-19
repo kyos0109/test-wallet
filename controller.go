@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -17,11 +16,17 @@ import (
 
 	"github.com/go-playground/validator/v10"
 
+	"github.com/kyos0109/test-wallet/config"
 	"github.com/kyos0109/test-wallet/database"
+	"github.com/kyos0109/test-wallet/kredis"
 	"github.com/kyos0109/test-wallet/modules"
 	"github.com/kyos0109/test-wallet/wallet"
+)
 
-	kredis "github.com/kyos0109/test-wallet/redis"
+const (
+	verifyFirstString = "happy"
+	postDeductCmd     = "deduct"
+	postStoreCmd      = "store"
 )
 
 var (
@@ -30,8 +35,16 @@ var (
 			return true
 		},
 	}
-	validate *validator.Validate
+	validate     *validator.Validate
+	verifyLength = len(verifyFirstString)
 )
+
+// CommandFunc ...
+type CommandFunc struct {
+	Open   bool
+	Detail interface{}
+	Fn     func(rd *modules.RedisData) (int, error)
+}
 
 // WsWallte ...
 func WsWallte(c *gin.Context) {
@@ -40,6 +53,11 @@ func WsWallte(c *gin.Context) {
 		return
 	}
 	defer ws.Close()
+
+	CmdFunc := map[string]CommandFunc{
+		postDeductCmd: {Fn: wallet.Entry, Detail: &modules.PostDeductv2{}, Open: true},
+		postStoreCmd:  {Fn: wallet.Entry, Detail: &modules.PostStorev2{}, Open: true},
+	}
 
 	for {
 		mt, message, err := ws.ReadMessage()
@@ -63,20 +81,40 @@ func WsWallte(c *gin.Context) {
 				}
 			}
 		case websocket.BinaryMessage:
-			switch true {
-			case bytes.Index(message, []byte(kredis.PostDeductCmd)) > 0:
-				rd.PostData = &modules.PostDatav2{Detail: &modules.PostDeductv2{}}
-			case bytes.Index(message, []byte(kredis.PostStoreCmd)) > 0:
-				rd.PostData = &modules.PostDatav2{Detail: &modules.PostStorev2{}}
-			default:
+			if len(message) < verifyLength {
+				err := ws.WriteMessage(mt, []byte("Verify Error."))
+				if err != nil {
+					break
+				}
+			}
+
+			if string(message[:verifyLength]) != verifyFirstString {
+				ws.WriteMessage(mt, []byte("Not Match"))
+				break
+			}
+
+			jsonMsg := message[verifyLength:]
+			if err := json.Unmarshal(jsonMsg, &rd.PostData); err != nil {
+				ws.WriteMessage(mt, []byte(err.Error()))
+				break
+			}
+
+			cmd, ok := CmdFunc[rd.PostData.Action]
+			if !ok {
 				ws.WriteMessage(mt, []byte("Not Allow Action"))
 				break
 			}
 
-			if err := json.Unmarshal([]byte(message), &rd.PostData); err != nil {
+			rd.PostData.Detail = cmd.Detail
+			if err := json.Unmarshal(jsonMsg, &rd.PostData); err != nil {
 				ws.WriteMessage(mt, []byte(err.Error()))
 				break
 			}
+
+			rd.PostData.ClientIP = c.ClientIP()
+			reqURL := c.Request.Host + c.Request.URL.String()
+			rd.PostData.RequestURL = reqURL
+			rd.PostData.RequestProto = c.Request.Proto
 
 			validate = validator.New()
 			err := validate.Struct(rd.PostData)
@@ -92,7 +130,7 @@ func WsWallte(c *gin.Context) {
 				break
 			}
 
-			_, err = wallet.Entry(&rd)
+			_, err = cmd.Fn(&rd)
 			if err != nil {
 				ws.WriteMessage(mt, []byte(err.Error()))
 				break
@@ -106,8 +144,10 @@ func WsWallte(c *gin.Context) {
 
 			err = ws.WriteMessage(mt, json)
 			if err != nil {
+				ws.WriteMessage(mt, []byte(err.Error()))
 				break
 			}
+
 		default:
 			err := ws.WriteMessage(mt, []byte(defaultMessage))
 			if err != nil {
@@ -125,12 +165,12 @@ func CreateRedisData(c *gin.Context) {
 	accountEnd := 501
 
 	hashMap := make(map[string]interface{})
-	hashMap[kredis.RedisHashWalletKey] = 100000
-	hashMap[kredis.RedisHashlastChangeKey] = time.Now()
-	hashMap[kredis.RedisHashlastGameKey] = 1
+	hashMap[config.RedisHashWalletKey] = 100000
+	hashMap[config.RedisHashlastChangeKey] = time.Now()
+	hashMap[config.RedisHashlastGameKey] = 1
 
 	for i := accountStart; i < accountEnd; i++ {
-		u := wallet.BuildRedisDataWithDelimiter(kredis.RedisUserPerfix, "100", strconv.Itoa(i))
+		u := wallet.BuildRedisDataWithDelimiter(config.RedisUserPrefix, "100", strconv.Itoa(i))
 		r.UserWalletHMSet(&modules.RedisData{UserKey: u, HashMap: hashMap})
 	}
 
@@ -147,19 +187,30 @@ func randStringRunes(n int) string {
 	return string(b)
 }
 
+func randAgentID(max int, ids []string) string {
+	return ids[rand.Intn(max)]
+}
+
 // CreateDBData ...
 func CreateDBData(c *gin.Context) {
-
 	accountStart := 0
-	accountEnd := 501
-	agnetID := 100
+	accountEnd := 5001
+	agnetNums := 1
+	agentIDs := []string{}
+	fakeAgent := []modules.Agent{}
+
+	for a := 0; a < agnetNums; a++ {
+		agentIDs = append(agentIDs, randStringRunes(8))
+		fakeAgent = append(fakeAgent, modules.Agent{ID: agentIDs[a], Key: randStringRunes(128), PrivateKey: []byte(randStringRunes(512)), Status: true, UpdateAt: time.Now()})
+	}
 
 	fakeUsers := []modules.User{}
 
 	for i := accountStart; i < accountEnd; i++ {
-		fakeUsers = append(fakeUsers, modules.User{Name: randStringRunes(32), Status: true, AgentID: agnetID, UpdateAt: time.Now()})
+		fakeUsers = append(fakeUsers, modules.User{Name: randStringRunes(32), Status: true, AgentID: randAgentID(agnetNums, agentIDs), UpdateAt: time.Now()})
 	}
 	pg := database.GetDBInstance()
+	pg.CreateFakceAgent(fakeAgent)
 	pg.CreateFakceUser(fakeUsers)
 
 	users := []modules.User{}
@@ -182,7 +233,12 @@ func CreateDBData(c *gin.Context) {
 func DeductWalletController(c *gin.Context) {
 	var rd modules.RedisData
 
-	rd.PostData = &modules.PostDatav2{Detail: &modules.PostDeductv2{}}
+	rd.PostData = &modules.PostDatav2{
+		ClientIP:     c.ClientIP(),
+		RequestURL:   c.Request.Host + c.Request.URL.String(),
+		RequestProto: c.Request.Proto,
+		Detail:       &modules.PostDeductv2{},
+	}
 
 	if err := c.ShouldBindJSON(&rd.PostData); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -192,16 +248,23 @@ func DeductWalletController(c *gin.Context) {
 	status, err := wallet.Entry(&rd)
 	if err != nil {
 		c.JSON(status, gin.H{"succes": false, "data": err.Error()})
+		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"succes": true, "data": &rd})
+	c.JSON(http.StatusOK, gin.H{"succes": true, "data": &rd.Order})
+	return
 }
 
 // StoreWalletController ...
 func StoreWalletController(c *gin.Context) {
 	var rd modules.RedisData
 
-	rd.PostData = &modules.PostDatav2{Detail: &modules.PostStorev2{}}
+	rd.PostData = &modules.PostDatav2{
+		ClientIP:     c.ClientIP(),
+		RequestProto: c.Request.Proto,
+		RequestURL:   c.Request.Host + c.Request.URL.String(),
+		Detail:       &modules.PostStorev2{},
+	}
 
 	if err := c.ShouldBindJSON(&rd.PostData); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -211,9 +274,11 @@ func StoreWalletController(c *gin.Context) {
 	status, err := wallet.Entry(&rd)
 	if err != nil {
 		c.JSON(status, gin.H{"succes": false, "data": err.Error()})
+		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"succes": true, "data": &rd})
+	c.JSON(http.StatusOK, gin.H{"succes": true, "data": &rd.Order})
+	return
 }
 
 func produce(ch chan<- string, p *modules.PostData) {
@@ -276,6 +341,8 @@ func DeductWalletControllerDB(c *gin.Context) {
 	var p modules.PostDatav2
 
 	p.ClientIP = c.ClientIP()
+	p.RequestURL = c.Request.Host + c.Request.URL.String()
+	p.RequestProto = c.Request.Proto
 	p.Detail = &modules.PostDeductv2{}
 
 	if err := c.ShouldBindJSON(&p); err != nil {
@@ -297,6 +364,8 @@ func StoreWalletControllerDB(c *gin.Context) {
 	var p modules.PostDatav2
 
 	p.ClientIP = c.ClientIP()
+	p.RequestURL = c.Request.Host + c.Request.URL.String()
+	p.RequestProto = c.Request.Proto
 	p.Detail = &modules.PostStorev2{}
 
 	if err := c.ShouldBindJSON(&p); err != nil {
@@ -311,4 +380,69 @@ func StoreWalletControllerDB(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"succes": true, "data": &p})
+}
+
+// EchoResponse ...
+func EchoResponse(c *gin.Context) {
+	var p modules.PostDatav2
+
+	if err := c.ShouldBindJSON(&p); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"echo": &p})
+	return
+}
+
+// DeductSingleWalletController ...
+func DeductSingleWalletController(c *gin.Context) {
+	var rd modules.RedisData
+
+	rd.PostData = &modules.PostDatav2{
+		ClientIP:     c.ClientIP(),
+		RequestURL:   c.Request.Host + c.Request.URL.String(),
+		RequestProto: c.Request.Proto,
+		Detail:       &modules.PostDeductv2{},
+	}
+
+	if err := c.ShouldBindJSON(&rd.PostData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	status, err := wallet.EntrySingle(&rd)
+	if err != nil {
+		c.JSON(status, gin.H{"succes": false, "data": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"succes": true, "data": &rd.Order})
+	return
+}
+
+// StoreSingleWalletController ...
+func StoreSingleWalletController(c *gin.Context) {
+	var rd modules.RedisData
+
+	rd.PostData = &modules.PostDatav2{
+		ClientIP:     c.ClientIP(),
+		RequestURL:   c.Request.Host + c.Request.URL.String(),
+		RequestProto: c.Request.Proto,
+		Detail:       &modules.PostStorev2{},
+	}
+
+	if err := c.ShouldBindJSON(&rd.PostData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	status, err := wallet.EntrySingle(&rd)
+	if err != nil {
+		c.JSON(status, gin.H{"succes": false, "data": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"succes": true, "data": &rd.Order})
+	return
 }
